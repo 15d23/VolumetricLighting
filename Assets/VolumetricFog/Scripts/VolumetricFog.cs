@@ -1,6 +1,7 @@
 ﻿using UnityEngine;
 using UnityEngine.Serialization;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 [ExecuteInEditMode]
 [RequireComponent (typeof(Camera))]
@@ -44,10 +45,6 @@ public class VolumetricFog : MonoBehaviour
 	RenderTexture m_VolumeScatter;
 	Vector3i m_VolumeResolution = new Vector3i(160, 90, 128);
 	Camera m_Camera;
-	Camera m_ShadowmapCamera;
-	RenderTexture m_Shadowmap;
-	RenderTexture m_ShadowmapBlurred;
-	int m_ShadowmapRes = 1024;
 
 	// Density
 	public float m_ConstantFog = 0;
@@ -70,18 +67,6 @@ public class VolumetricFog : MonoBehaviour
 	[MinValue(0)]
 	public float m_AmbientLightIntensity = 0.0f;
 	public Color m_AmbientLightColor = Color.white;
-
-	[HideInInspector]
-	public bool m_BlurShadowmap = false;
-	[HideInInspector]
-	[Range(0, 2)]
-	public int m_ShadowmapDownsample = 1;
-	[HideInInspector]
-	[Range(0.0f, 10.0f)]
-	public float m_BlurSize = 3.0f;
-	[HideInInspector]
-	[Range(1, 4)]
-	public int m_BlurIterations = 2;
 
 	struct Vector3i
 	{
@@ -161,6 +146,8 @@ public class VolumetricFog : MonoBehaviour
 	FogEllipsoidParams[] m_FogEllipsoidParams;
 	ComputeBuffer m_FogEllipsoidParamsCB;
 
+	ComputeBuffer m_DummyCB;
+
 	Camera cam{ get { if (m_Camera == null) m_Camera = GetComponent<Camera>(); return m_Camera; }}
 
 	float nearClip { get { return Mathf.Max(0, m_NearClip); } }
@@ -192,6 +179,7 @@ public class VolumetricFog : MonoBehaviour
 		ReleaseComputeBuffer(ref m_TubeLightShadowPlaneParamsCB);
 		ReleaseComputeBuffer(ref m_AreaLightParamsCB);
 		ReleaseComputeBuffer(ref m_FogEllipsoidParamsCB);
+		ReleaseComputeBuffer(ref m_DummyCB);
 		m_VolumeInject = null;
 		m_VolumeScatter = null;
 	}
@@ -208,7 +196,11 @@ public class VolumetricFog : MonoBehaviour
 		int count = m_PointLightParamsCB == null ? 0 : m_PointLightParamsCB.count;
 		m_InjectLightingAndDensity.SetFloat("_PointLightsCount", count);
 		if (count == 0)
+		{
+			// Can't not set the buffer
+			m_InjectLightingAndDensity.SetBuffer(kernel, "_PointLights", m_DummyCB);
 			return;
+		}
 
 		if (m_PointLightParams == null || m_PointLightParams.Length != count)
 			m_PointLightParams = new PointLightParams[count];
@@ -242,7 +234,12 @@ public class VolumetricFog : MonoBehaviour
 		int count = m_TubeLightParamsCB == null ? 0 : m_TubeLightParamsCB.count;
 		m_InjectLightingAndDensity.SetFloat("_TubeLightsCount", count);
 		if (count == 0)
+		{
+			// Can't not set the buffer
+			m_InjectLightingAndDensity.SetBuffer(kernel, "_TubeLights", m_DummyCB);
+			m_InjectLightingAndDensity.SetBuffer(kernel, "_TubeLightShadowPlanes", m_DummyCB);
 			return;
+		}
 
 		if (m_TubeLightParams == null || m_TubeLightParams.Length != count)
 			m_TubeLightParams = new TubeLightParams[count];
@@ -293,14 +290,19 @@ public class VolumetricFog : MonoBehaviour
 		int count = m_AreaLightParamsCB == null ? 0 : m_AreaLightParamsCB.count;
 		m_InjectLightingAndDensity.SetFloat("_AreaLightsCount", count);
 		if (count == 0)
+		{
+			// Can't not set the buffers/textures
+			m_InjectLightingAndDensity.SetBuffer(kernel, "_AreaLights", m_DummyCB);
+			m_InjectLightingAndDensity.SetTexture(kernel, "_AreaLightShadowmap", Texture2D.whiteTexture);
 			return;
+		}
 
 		if (m_AreaLightParams == null || m_AreaLightParams.Length != count)
 			m_AreaLightParams = new AreaLightParams[count];
 
 		HashSet<FogLight> fogLights = LightManagerFogLights.Get();
 
-		int shadowedAreaLightIndex = fogLights.Count;
+		int shadowedAreaLightIndex = -1;
 		int j = 0;
 		for (var x = fogLights.GetEnumerator(); x.MoveNext();)
 		{
@@ -328,10 +330,11 @@ public class VolumetricFog : MonoBehaviour
 
 			j++;
 		}
-
 		m_AreaLightParamsCB.SetData(m_AreaLightParams);
 		m_InjectLightingAndDensity.SetBuffer(kernel, "_AreaLights", m_AreaLightParamsCB);
-		m_InjectLightingAndDensity.SetFloat("_ShadowedAreaLightIndex", shadowedAreaLightIndex);
+		m_InjectLightingAndDensity.SetFloat("_ShadowedAreaLightIndex", shadowedAreaLightIndex < 0 ? fogLights.Count : shadowedAreaLightIndex);
+		if (shadowedAreaLightIndex < 0)
+			m_InjectLightingAndDensity.SetTexture(kernel, "_AreaLightShadowmap", Texture2D.whiteTexture);
 	}
 
 	void SetUpFogEllipsoidBuffers(int kernel)
@@ -346,7 +349,11 @@ public class VolumetricFog : MonoBehaviour
 
 		m_InjectLightingAndDensity.SetFloat("_FogEllipsoidsCount", count);
 		if (count == 0)
+		{
+			// Can't not set the buffer
+			m_InjectLightingAndDensity.SetBuffer(kernel, "_FogEllipsoids", m_DummyCB);
 			return;
+		}
 
 		if (m_FogEllipsoidParams == null || m_FogEllipsoidParams.Length != count)
 			m_FogEllipsoidParams = new FogEllipsoidParams[count];
@@ -455,11 +462,10 @@ public class VolumetricFog : MonoBehaviour
 		// Compensate for more light and density being injected in per world space meter when near and far are closer.
 		// TODO: Not quite correct yet.
 		float depthCompensation = (farClip - nearClip) * 0.01f;
-		m_InjectLightingAndDensity.SetFloat("_Density", m_GlobalDensityMult * 0.001f * depthCompensation);
+		m_InjectLightingAndDensity.SetFloat("_Density", m_GlobalDensityMult * 0.128f * depthCompensation);
 		m_InjectLightingAndDensity.SetFloat("_Intensity", m_GlobalIntensityMult);
 		m_InjectLightingAndDensity.SetFloat("_Anisotropy", m_Anisotropy);
 		m_InjectLightingAndDensity.SetTexture(kernel, "_VolumeInject", m_VolumeInject);
-		m_InjectLightingAndDensity.SetTexture(kernel, "_Shadowmap", m_BlurShadowmap ? m_ShadowmapBlurred : (m_Shadowmap != null ? m_Shadowmap : (Texture)Texture2D.whiteTexture));
 		m_InjectLightingAndDensity.SetTexture(kernel, "_Noise", m_Noise);
 
 		if (m_fogParams == null || m_fogParams.Length != 4)
@@ -510,8 +516,6 @@ public class VolumetricFog : MonoBehaviour
 		m_Scatter.SetTexture(0, "_VolumeInject", m_VolumeInject);
 		m_Scatter.SetTexture(0, "_VolumeScatter", m_VolumeScatter);
 		m_Scatter.Dispatch(0, m_VolumeResolution.x/m_ScatterNumThreads.x, m_VolumeResolution.y/m_ScatterNumThreads.y, 1);
-
-		ReleaseTempResources();
 	}
 
 	void DebugDisplay(RenderTexture src, RenderTexture dest)
@@ -520,8 +524,6 @@ public class VolumetricFog : MonoBehaviour
 
 		m_DebugMaterial.SetTexture("_VolumeInject", m_VolumeInject);
 		m_DebugMaterial.SetTexture("_VolumeScatter", m_VolumeScatter);
-		m_DebugMaterial.SetTexture("_Shadowmap", m_Shadowmap);
-		m_DebugMaterial.SetTexture("_ShadowmapBlurred", m_ShadowmapBlurred);
 		m_DebugMaterial.SetFloat("_Z", m_Z);
 
 		m_DebugMaterial.SetTexture("_MainTex", src);
@@ -541,6 +543,14 @@ public class VolumetricFog : MonoBehaviour
 	[ImageEffectOpaque]
 	void OnRenderImage(RenderTexture src, RenderTexture dest)
 	{
+		if (!CheckSupport())
+		{
+			Debug.LogError(GetUnsupportedErrorMessage());
+			Graphics.Blit(src, dest);
+			enabled = false;
+			return;
+		}
+
 		if(m_Debug)
 		{
 			DebugDisplay(src, dest);
@@ -634,11 +644,6 @@ public class VolumetricFog : MonoBehaviour
 
 	void InitResources ()
 	{
-		// Shadowmap
-		m_Shadowmap = RenderTexture.GetTemporary(m_ShadowmapRes, m_ShadowmapRes, 24, RenderTextureFormat.RFloat);
-		m_Shadowmap.filterMode = FilterMode.Bilinear;
-		m_Shadowmap.wrapMode = TextureWrapMode.Clamp;
-
 		// Volume
 		InitVolume(ref m_VolumeInject);
 		InitVolume(ref m_VolumeScatter);
@@ -663,21 +668,13 @@ public class VolumetricFog : MonoBehaviour
 			}
 		}
 
-		// PointLightParams {float3 float float3 float} -> 32 bytes
-		CreateBuffer(ref m_PointLightParamsCB, pointLightCount, 32);
-
-		// TubeLightParams {float3 float float3 float float3 float} -> 48 bytes
-		CreateBuffer(ref m_TubeLightParamsCB, tubeLightCount, 48);
-
-		// TubeLightShadowPlaneParams {float4 float4 float float float float} -> 48 bytes
-		CreateBuffer(ref m_TubeLightShadowPlaneParamsCB, tubeLightCount, 48);
-
-		// TubeLightParams {float4x4 float4 float3 float} -> 96 bytes
-		CreateBuffer(ref m_AreaLightParamsCB, areaLightCount, 96);
-
-		// FogEllipsoidParams {float3 float float3 9xfloat} -> 64 bytes
+		CreateBuffer(ref m_PointLightParamsCB, pointLightCount, Marshal.SizeOf(typeof(PointLightParams)));
+		CreateBuffer(ref m_TubeLightParamsCB, tubeLightCount, Marshal.SizeOf(typeof(TubeLightParams)));
+		CreateBuffer(ref m_TubeLightShadowPlaneParamsCB, tubeLightCount, Marshal.SizeOf(typeof(TubeLightShadowPlaneParams)));
+		CreateBuffer(ref m_AreaLightParamsCB, areaLightCount, Marshal.SizeOf(typeof(AreaLightParams)));
 		HashSet<FogEllipsoid> fogEllipsoids = LightManagerFogEllipsoids.Get();
-		CreateBuffer(ref m_FogEllipsoidParamsCB, fogEllipsoids == null ? 0 : fogEllipsoids.Count, 64);
+		CreateBuffer(ref m_FogEllipsoidParamsCB, fogEllipsoids == null ? 0 : fogEllipsoids.Count, Marshal.SizeOf(typeof(FogEllipsoidParams)));
+		CreateBuffer(ref m_DummyCB, 1, 4);
 	}
 
 	void ReleaseTemporary(ref RenderTexture rt)
@@ -687,12 +684,6 @@ public class VolumetricFog : MonoBehaviour
 
 		RenderTexture.ReleaseTemporary(rt);
 		rt = null;
-	}
-
-	void ReleaseTempResources()
-	{
-		ReleaseTemporary(ref m_Shadowmap);
-		ReleaseTemporary(ref m_ShadowmapBlurred);
 	}
 
 	void InitMaterial(ref Material material, Shader shader)
@@ -715,5 +706,16 @@ public class VolumetricFog : MonoBehaviour
 		Gizmos.color = Color.yellow;
 		Gizmos.matrix = transform.localToWorldMatrix;
 		Gizmos.DrawFrustum(Vector3.zero, cam.fieldOfView, farClip, nearClip, cam.aspect);
+	}
+
+	public static bool CheckSupport()
+	{
+		return SystemInfo.supportsComputeShaders;
+	}
+
+	public static string GetUnsupportedErrorMessage()
+	{
+		return "Volumetric Fog requires compute shaders and this platform doesn't support them. Disabling. \nDetected device type: " + 
+			SystemInfo.graphicsDeviceType + ", version: " + SystemInfo.graphicsDeviceVersion;
 	}
 }
